@@ -454,13 +454,26 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
     ) -> Result<ExecutionSpawnResult, error::Error> {
         match self.shell {
             ShellForCommand::OwnedShell { target, .. } => {
-                Ok(Self::execute_via_builtin_in_owned_shell(
-                    *target,
-                    self.params,
-                    builtin,
-                    self.command_name,
-                    self.args,
-                ))
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Ok(Self::execute_via_builtin_in_owned_shell(
+                        *target,
+                        self.params,
+                        builtin,
+                        self.command_name,
+                        self.args,
+                    ))
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    Ok(Self::execute_via_builtin_in_owned_shell(
+                        *target,
+                        self.params,
+                        builtin,
+                        self.command_name,
+                        self.args,
+                    ).await)
+                }
             }
             ShellForCommand::ParentShell(..) => {
                 self.execute_via_builtin_in_parent_shell(builtin).await
@@ -468,6 +481,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn execute_via_builtin_in_owned_shell(
         mut shell: Shell<SE>,
         params: ExecutionParameters,
@@ -488,6 +502,28 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
         ExecutionSpawnResult::StartedTask(join_handle)
     }
+
+    #[cfg(target_family = "wasm")]
+    async fn execute_via_builtin_in_owned_shell(
+        mut shell: Shell<SE>,
+        params: ExecutionParameters,
+        builtin: builtins::Registration<SE>,
+        command_name: String,
+        args: Vec<CommandArg>,
+    ) -> ExecutionSpawnResult {
+        // WASM doesn't support spawn_blocking, so run inline as async
+        let cmd_context = ExecutionContext {
+            shell: &mut shell,
+            command_name,
+            params,
+        };
+
+        match execute_builtin_command(&builtin, cmd_context, args).await {
+            Ok(result) => ExecutionSpawnResult::Completed(result),
+            Err(e) => ExecutionSpawnResult::Completed(e.into_result(&shell)),
+        }
+    }
+
 
     async fn execute_via_builtin_in_parent_shell(
         self,
@@ -754,7 +790,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
     // Set up pipe so we can read the output.
-    let (reader, writer) = std::io::pipe()?;
+    let (reader, writer) = sys::pipes::pipe()?;
     params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
     // Start the execution of the command, but don't wait for it to

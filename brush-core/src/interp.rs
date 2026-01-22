@@ -443,7 +443,7 @@ async fn spawn_pipeline_processes(
     // command.
     if pipeline_len > 1 {
         for _ in 0..(pipeline_len - 1) {
-            let (reader, writer) = std::io::pipe()?;
+            let (reader, writer) = sys::pipes::pipe()?;
             pipe_readers.push(Some(reader.into()));
             pipe_writers.push(Some(writer.into()));
         }
@@ -1815,7 +1815,7 @@ fn setup_process_substitution(
     child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
     // Set up pipe so we can connect to the command.
-    let (reader, writer) = std::io::pipe()?;
+    let (reader, writer) = sys::pipes::pipe()?;
     let (reader, writer) = (reader.into(), writer.into());
 
     let target_file = match kind {
@@ -1854,7 +1854,7 @@ fn setup_process_substitution(
 }
 
 fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Error> {
-    let (reader, mut writer) = std::io::pipe()?;
+    let (reader, mut writer) = sys::pipes::pipe()?;
 
     let bytes = contents.as_bytes();
 

@@ -18,7 +18,8 @@ pub(crate) mod wasm;
 pub(crate) use wasm as platform;
 
 #[cfg(not(unix))]
-pub(crate) mod stubs;
+/// Stub implementations for platforms without native support.
+pub mod stubs;
 
 #[cfg(any(unix, windows))]
 pub(crate) mod hostname;
@@ -39,3 +40,6 @@ pub use platform::terminal;
 pub(crate) use platform::users;
 
 pub use platform::PlatformError;
+
+// Platform-specific pipe implementation
+pub(crate) use platform::pipes;

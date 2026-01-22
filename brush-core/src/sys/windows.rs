@@ -19,3 +19,4 @@ pub(crate) mod users;
 /// Platform-specific errors.
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {}
+pub(crate) use crate::sys::stubs::pipes;

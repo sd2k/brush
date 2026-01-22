@@ -24,3 +24,4 @@ impl From<nix::errno::Errno> for error::ErrorKind {
         PlatformError::ErrnoError(err).into()
     }
 }
+pub(crate) mod pipes;

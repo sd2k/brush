@@ -8,6 +8,17 @@ use crate::ShellFd;
 use crate::error;
 use crate::sys;
 
+
+// Platform-specific pipe types
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type PipeReaderType = std::io::PipeReader;
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type PipeWriterType = std::io::PipeWriter;
+
+#[cfg(target_family = "wasm")]
+pub(crate) type PipeReaderType = sys::pipes::PipeReader;
+#[cfg(target_family = "wasm")]
+pub(crate) type PipeWriterType = sys::pipes::PipeWriter;
 /// A trait representing a stream that can be read from and written to.
 /// This is used for custom stream implementations in `OpenFile`.
 ///
@@ -39,9 +50,9 @@ pub enum OpenFile {
     /// A file open for reading or writing.
     File(std::fs::File),
     /// A read end of a pipe.
-    PipeReader(std::io::PipeReader),
+    PipeReader(PipeReaderType),
     /// A write end of a pipe.
-    PipeWriter(std::io::PipeWriter),
+    PipeWriter(PipeWriterType),
     /// A custom stream.
     Stream(Box<dyn Stream>),
 }
@@ -213,14 +224,14 @@ impl From<std::fs::File> for OpenFile {
     }
 }
 
-impl From<std::io::PipeReader> for OpenFile {
-    fn from(reader: std::io::PipeReader) -> Self {
+impl From<PipeReaderType> for OpenFile {
+    fn from(reader: PipeReaderType) -> Self {
         Self::PipeReader(reader)
     }
 }
 
-impl From<std::io::PipeWriter> for OpenFile {
-    fn from(writer: std::io::PipeWriter) -> Self {
+impl From<PipeWriterType> for OpenFile {
+    fn from(writer: PipeWriterType) -> Self {
         Self::PipeWriter(writer)
     }
 }

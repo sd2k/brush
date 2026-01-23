@@ -472,7 +472,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
                         builtin,
                         self.command_name,
                         self.args,
-                    ).await)
+                    )
+                    .await)
                 }
             }
             ShellForCommand::ParentShell(..) => {
@@ -523,7 +524,6 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
             Err(e) => ExecutionSpawnResult::Completed(e.into_result(&shell)),
         }
     }
-
 
     async fn execute_via_builtin_in_parent_shell(
         self,

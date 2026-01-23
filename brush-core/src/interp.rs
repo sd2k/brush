@@ -1674,9 +1674,10 @@ pub(crate) async fn setup_redirect(
 
                         params.open_files.set_fd(fd_num, target_file);
                     } else if fd_num == 1 && !dash {
-                        // Special case for compatibility: redirect stdout and stderr to the file given by `expanded`.
+                        // Special case for compatibility: redirect stdout and stderr to the file
+                        // given by `expanded`.
                         setup_redirect_output_and_error_to(
-                            shell, params, &expanded, false, /*append?*/
+                            shell, params, &expanded, false, /* append? */
                         )?;
                     } else {
                         return Err(error::ErrorKind::InvalidRedirection.into());

@@ -36,17 +36,16 @@ impl CloneableFile {
 
     /// Get file metadata.
     pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
-        let file = self.inner.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "mutex poisoned")
-        })?;
+        let file = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex poisoned"))?;
         file.metadata()
     }
 
     /// Check if this is a directory.
     pub fn is_dir(&self) -> bool {
-        self.metadata()
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
+        self.metadata().map(|m| m.is_dir()).unwrap_or(false)
     }
 
     /// Check if this is a terminal (always false on WASM).
@@ -57,45 +56,48 @@ impl CloneableFile {
 
 impl Read for CloneableFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut file = self.inner.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "mutex poisoned")
-        })?;
-        
+        let mut file = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex poisoned"))?;
+
         // Seek to our position
         file.seek(SeekFrom::Start(self.position))?;
-        
+
         // Read
         let n = file.read(buf)?;
-        
+
         // Update our position
         self.position += n as u64;
-        
+
         Ok(n)
     }
 }
 
 impl Write for CloneableFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self.inner.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "mutex poisoned")
-        })?;
-        
+        let mut file = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex poisoned"))?;
+
         // Seek to our position
         file.seek(SeekFrom::Start(self.position))?;
-        
+
         // Write
         let n = file.write(buf)?;
-        
+
         // Update our position
         self.position += n as u64;
-        
+
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self.inner.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "mutex poisoned")
-        })?;
+        let mut file = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex poisoned"))?;
         file.flush()
     }
 }

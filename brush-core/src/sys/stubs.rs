@@ -8,6 +8,7 @@
 
 pub mod commands;
 pub mod fd;
+pub mod file;
 pub mod fs;
 pub mod input;
 pub(crate) mod network;

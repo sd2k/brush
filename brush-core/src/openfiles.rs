@@ -8,7 +8,6 @@ use crate::ShellFd;
 use crate::error;
 use crate::sys;
 
-
 // Platform-specific pipe types
 #[cfg(not(target_family = "wasm"))]
 pub(crate) type PipeReaderType = std::io::PipeReader;
@@ -19,6 +18,15 @@ pub(crate) type PipeWriterType = std::io::PipeWriter;
 pub(crate) type PipeReaderType = sys::pipes::PipeReader;
 #[cfg(target_family = "wasm")]
 pub(crate) type PipeWriterType = sys::pipes::PipeWriter;
+
+// Platform-specific file types
+// On native platforms, use std::fs::File directly
+// On WASM, use a cloneable wrapper since File::try_clone() doesn't work
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type FileType = std::fs::File;
+#[cfg(target_family = "wasm")]
+pub(crate) type FileType = sys::file::CloneableFile;
+
 /// A trait representing a stream that can be read from and written to.
 /// This is used for custom stream implementations in `OpenFile`.
 ///
@@ -48,7 +56,7 @@ pub enum OpenFile {
     /// The original standard error this process was started with.
     Stderr(std::io::Stderr),
     /// A file open for reading or writing.
-    File(std::fs::File),
+    File(FileType),
     /// A read end of a pipe.
     PipeReader(PipeReaderType),
     /// A write end of a pipe.
@@ -100,7 +108,7 @@ impl<'de> serde::Deserialize<'de> for OpenFile {
 /// Returns an open file that will discard all I/O.
 pub fn null() -> Result<OpenFile, error::Error> {
     let file = sys::fs::open_null_file()?;
-    Ok(OpenFile::File(file))
+    Ok(OpenFile::File(file.into()))
 }
 
 impl Clone for OpenFile {
@@ -132,7 +140,7 @@ impl OpenFile {
             Self::Stdin(_) => std::io::stdin().into(),
             Self::Stdout(_) => std::io::stdout().into(),
             Self::Stderr(_) => std::io::stderr().into(),
-            Self::File(f) => f.try_clone()?.into(),
+            Self::File(f) => Self::File(f.try_clone()?),
             Self::PipeReader(f) => f.try_clone()?.into(),
             Self::PipeWriter(f) => f.try_clone()?.into(),
             Self::Stream(s) => Self::Stream(s.clone_box()),
@@ -180,7 +188,10 @@ impl OpenFile {
     pub(crate) fn is_dir(&self) -> bool {
         match self {
             Self::Stdin(_) | Self::Stdout(_) | Self::Stderr(_) => false,
+            #[cfg(not(target_family = "wasm"))]
             Self::File(file) => file.metadata().map(|m| m.is_dir()).unwrap_or(false),
+            #[cfg(target_family = "wasm")]
+            Self::File(file) => file.is_dir(),
             Self::PipeReader(_) | Self::PipeWriter(_) | Self::Stream(_) => false,
         }
     }
@@ -191,6 +202,9 @@ impl OpenFile {
             Self::Stdin(f) => f.is_terminal(),
             Self::Stdout(f) => f.is_terminal(),
             Self::Stderr(f) => f.is_terminal(),
+            #[cfg(not(target_family = "wasm"))]
+            Self::File(f) => f.is_terminal(),
+            #[cfg(target_family = "wasm")]
             Self::File(f) => f.is_terminal(),
             Self::PipeReader(_) | Self::PipeWriter(_) | Self::Stream(_) => false,
         }
@@ -220,7 +234,7 @@ impl From<std::io::Stderr> for OpenFile {
 
 impl From<std::fs::File> for OpenFile {
     fn from(file: std::fs::File) -> Self {
-        Self::File(file)
+        Self::File(file.into())
     }
 }
 
@@ -242,7 +256,10 @@ impl From<OpenFile> for Stdio {
             OpenFile::Stdin(_) => Self::inherit(),
             OpenFile::Stdout(_) => Self::inherit(),
             OpenFile::Stderr(_) => Self::inherit(),
+            #[cfg(not(target_family = "wasm"))]
             OpenFile::File(f) => f.into(),
+            #[cfg(target_family = "wasm")]
+            OpenFile::File(_) => Self::null(), // Can't convert CloneableFile to Stdio on WASM
             OpenFile::PipeReader(f) => f.into(),
             OpenFile::PipeWriter(f) => f.into(),
             // NOTE: Custom streams cannot be converted to `Stdio`; we do our best here

@@ -43,3 +43,7 @@ pub use platform::PlatformError;
 
 // Platform-specific pipe implementation
 pub(crate) use platform::pipes;
+
+// Platform-specific file implementation (WASM uses cloneable wrapper)
+#[cfg(target_family = "wasm")]
+pub(crate) use platform::file;

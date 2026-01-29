@@ -771,6 +771,7 @@ pub(crate) async fn invoke_shell_function(
     Ok(result.into())
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn invoke_command_in_subshell_and_get_output(
     shell: &mut Shell<impl extensions::ShellExtensions>,
     params: &ExecutionParameters,
@@ -811,6 +812,44 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     // Now observe the command's completion.
     let run_result = cmd_join_handle.await?;
     let cmd_result = run_result?;
+
+    // Store the status.
+    shell.set_last_exit_status(cmd_result.exit_code.into());
+
+    Ok(output_str)
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn invoke_command_in_subshell_and_get_output(
+    shell: &mut Shell<impl extensions::ShellExtensions>,
+    params: &ExecutionParameters,
+    s: String,
+) -> Result<String, error::Error> {
+    // Instantiate a subshell to run the command in.
+    let mut subshell = shell.clone();
+
+    // Command substitutions don't inherit errexit by default. Only inherit it when
+    // command_subst_inherits_errexit is enabled, otherwise disable errexit in the subshell.
+    if !shell.options().command_subst_inherits_errexit {
+        subshell.options_mut().exit_on_nonzero_command_exit = false;
+    }
+
+    // Get our own set of parameters we can customize and use.
+    let mut params = params.clone();
+    params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
+
+    // Set up pipe so we can read the output.
+    let (reader, writer) = sys::pipes::pipe()?;
+    params.set_fd(OpenFiles::STDOUT_FD, writer.into());
+
+    // WASM doesn't support spawn_blocking, so we run the command first and then
+    // read output. This means large outputs could deadlock if they exceed the
+    // pipe buffer, but this is an acceptable limitation for WASM use cases.
+    // The command must complete before we read, so the writer must be dropped.
+    let cmd_result = run_substitution_command(subshell, params, s).await?;
+
+    // Extract output - writer was dropped when run_substitution_command finished
+    let output_str = std::io::read_to_string(reader)?;
 
     // Store the status.
     shell.set_last_exit_status(cmd_result.exit_code.into());

@@ -418,6 +418,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
             }
         }
 
+        // On WASI, try the external spawn handler before PATH search.
+        // This allows the host to intercept commands and run them as WASI components.
+        #[cfg(target_os = "wasi")]
+        {
+            if let Some(result) = self.try_execute_via_spawn_handler().await {
+                return result;
+            }
+        }
+
         // We still haven't found a command to invoke. We'll need to look for an external command.
         if !self.command_name.contains(std::path::MAIN_SEPARATOR) {
             // All else failed; if we were given path directories to search, try to look through
@@ -568,6 +577,146 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         }
 
         result
+    }
+
+    /// Try to execute the command via the WASI spawn handler.
+    ///
+    /// Returns `None` if no handler is registered or the command was not found.
+    /// Returns `Some(Ok(...))` if the command was executed successfully.
+    /// Returns `Some(Err(...))` if execution failed.
+    #[cfg(target_os = "wasi")]
+    async fn try_execute_via_spawn_handler(
+        &mut self,
+    ) -> Option<Result<ExecutionSpawnResult, error::Error>> {
+        use std::io::{Read, Write};
+
+        // Collect string args (skip argv[0] which is the command name)
+        let args: Vec<String> = self.args[1..]
+            .iter()
+            .filter_map(|a| {
+                if let CommandArg::String(s) = a {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Collect exported environment variables
+        let env: Vec<(String, String)> = self
+            .shell
+            .env()
+            .iter_exported()
+            .filter_map(|(k, v)| {
+                if v.value().is_set() {
+                    Some((
+                        k.to_string(),
+                        v.value().to_cow_str(&*self.shell).into_owned(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let cwd = self.shell.working_dir().to_string_lossy().to_string();
+
+        let spawn_result =
+            sys::process::try_spawn(&self.command_name, &args, env, &cwd)?;
+
+        match spawn_result {
+            Ok(mut child) => {
+                // Batch approach: read available stdin, write to child, close, wait, read output
+
+                // Read available stdin data and forward to child.
+                // We use chunked reads instead of read_to_end because on WASM,
+                // pipe fds are Arc-based and EOF may not be signaled if other
+                // clones of the write end still exist in the pipeline params.
+                let mut stdin_data = Vec::new();
+                let mut stdin = self.params.stdin(&self.shell);
+                let mut buf = [0u8; 65536];
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,           // EOF
+                        Ok(n) => stdin_data.extend_from_slice(&buf[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                    // On WASM, pipe reads are non-blocking once buffered data is consumed.
+                    // After reading available data, break to avoid blocking on EOF.
+                    if stdin_data.len() >= buf.len() {
+                        // We read a full chunk; there might be more. Continue.
+                        continue;
+                    }
+                    // Read less than a full chunk — likely all data consumed.
+                    break;
+                }
+                drop(stdin);
+                if !stdin_data.is_empty() {
+                    if let Err(e) = child.write_stdin(&stdin_data) {
+                        let mut stderr = self.params.stderr(&self.shell);
+                        let _ = writeln!(stderr, "{}: write error: {e}", self.command_name);
+                        return Some(Ok(ExecutionSpawnResult::Completed(
+                            ExecutionResult::new(1),
+                        )));
+                    }
+                }
+                child.close_stdin();
+
+                // Wait for child to complete
+                match child.wait() {
+                    Ok(exit_code) => {
+                        // Read stdout and write to our stdout
+                        let mut stdout_buf = [0u8; 65536];
+                        loop {
+                            match child.read_stdout(&mut stdout_buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let mut stdout = self.params.stdout(&self.shell);
+                                    let _ = stdout.write_all(&stdout_buf[..n]);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        // Read stderr and write to our stderr
+                        loop {
+                            match child.read_stderr(&mut stdout_buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let mut stderr = self.params.stderr(&self.shell);
+                                    let _ = stderr.write_all(&stdout_buf[..n]);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        Some(Ok(ExecutionSpawnResult::Completed(
+                            ExecutionResult::new(u8::try_from(exit_code).unwrap_or(if exit_code == 0 { 0 } else { 1 })),
+                        )))
+                    }
+                    Err(e) => {
+                        let mut stderr = self.params.stderr(&self.shell);
+                        let _ = writeln!(stderr, "{}: {e}", self.command_name);
+                        Some(Ok(ExecutionSpawnResult::Completed(
+                            ExecutionResult::new(1),
+                        )))
+                    }
+                }
+            }
+            Err(sys::process::SpawnError::NotFound(_)) => {
+                // Not found in registry, fall through to PATH search
+                None
+            }
+            Err(sys::process::SpawnError::Failed(msg)) => {
+                Some(Err(ErrorKind::FailedToExecuteCommand(
+                    self.command_name.clone(),
+                    std::io::Error::other(msg),
+                )
+                .into()))
+            }
+        }
     }
 
     fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {

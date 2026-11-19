@@ -7,12 +7,19 @@ use crate::{error, extensions};
 impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
     /// Checks for completed jobs in the shell, reporting any changes found.
     pub fn check_for_completed_jobs(&mut self) -> Result<(), error::Error> {
+        // Without job control nothing reports a finished job, so it's kept, with its status, for
+        // `wait` to collect, as bash does.
+        if !self.options.enable_job_control {
+            for job in &mut self.jobs.jobs {
+                let _ = job.poll_done()?;
+            }
+            return Ok(());
+        }
+
         let results = self.jobs.poll()?;
 
-        if self.options.enable_job_control {
-            for (job, _result) in results {
-                writeln!(self.stderr(), "{job}")?;
-            }
+        for (job, _result) in results {
+            writeln!(self.stderr(), "{job}")?;
         }
 
         Ok(())

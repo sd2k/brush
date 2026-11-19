@@ -287,10 +287,10 @@ pub enum JobState {
 impl Display for JobState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unknown => write!(f, "Unknown"),
-            Self::Running => write!(f, "Running"),
-            Self::Stopped => write!(f, "Stopped"),
-            Self::Done => write!(f, "Done"),
+            Self::Unknown => f.pad("Unknown"),
+            Self::Running => f.pad("Running"),
+            Self::Stopped => f.pad("Stopped"),
+            Self::Done => f.pad("Done"),
         }
     }
 }
@@ -309,9 +309,9 @@ pub enum JobAnnotation {
 impl Display for JobAnnotation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::None => write!(f, ""),
-            Self::Current => write!(f, "+"),
-            Self::Previous => write!(f, "-"),
+            Self::None => f.pad(""),
+            Self::Current => f.pad("+"),
+            Self::Previous => f.pad("-"),
         }
     }
 }

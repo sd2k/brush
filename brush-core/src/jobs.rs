@@ -6,6 +6,7 @@ use std::fmt::Display;
 
 use futures::FutureExt;
 
+use crate::ExecutionExitCode;
 use crate::ExecutionResult;
 use crate::error;
 use crate::processes;
@@ -16,11 +17,18 @@ use crate::traps;
 
 pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
+/// The first ID [`JobManager`] gives a job of its own: one more than the largest
+/// process ID Linux hands out, so that no process has one.
+const FIRST_JOB_PID: sys::process::ProcessId = (1 << 22) + 1;
+
 /// Manages the jobs that are currently managed by the shell.
 #[derive(Default)]
 pub struct JobManager {
     /// The jobs that are currently managed by the shell.
     pub jobs: Vec<Job>,
+
+    /// The ID of the last job given one of the shell's own.
+    last_job_pid: Option<sys::process::ProcessId>,
 }
 
 /// Represents a task that is part of a job.
@@ -103,6 +111,13 @@ impl JobManager {
         let id = self.jobs.len() + 1;
         job.id = id;
         job.annotation = JobAnnotation::Current;
+        // A job with no process of its own (e.g., one running in a task of the shell's) still
+        // needs an ID for `$!`, `wait`, and `kill`.
+        let pid = self
+            .last_job_pid
+            .map_or(FIRST_JOB_PID, |pid| pid.wrapping_add(1).max(FIRST_JOB_PID));
+        self.last_job_pid = Some(pid);
+        job.own_pid = Some(pid);
         self.jobs.push(job);
 
         #[allow(clippy::unwrap_used, reason = "we just pushed an element")]
@@ -157,6 +172,55 @@ impl JobManager {
                 None
             }
         }
+    }
+
+    /// Returns the job with the given process ID: its representative one, or the ID the shell
+    /// gave it.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - The process ID to look for.
+    pub fn find_by_pid(&mut self, pid: sys::process::ProcessId) -> Option<&mut Job> {
+        self.jobs
+            .iter_mut()
+            .find(|j| j.representative_pid() == Some(pid))
+    }
+
+    /// Removes the job with the given ID, returning it.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The shell-internal ID of the job.
+    pub fn remove(&mut self, id: usize) -> Option<Job> {
+        let i = self.jobs.iter().position(|j| j.id == id)?;
+        Some(self.jobs.remove(i))
+    }
+
+    /// Waits for the first of the given jobs to complete, or of all of them if `ids` is
+    /// `None`; returns its ID and result, or `None` if there's no such job to wait for.
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - The shell-internal IDs of the jobs to wait for.
+    pub async fn wait_any(
+        &mut self,
+        ids: Option<&[usize]>,
+    ) -> Option<(usize, Result<ExecutionResult, error::Error>)> {
+        let waits: Vec<_> = self
+            .jobs
+            .iter_mut()
+            .filter(|j| ids.is_none_or(|ids| ids.contains(&j.id)))
+            .map(|j| {
+                Box::pin(async move {
+                    let id = j.id;
+                    (id, j.wait().await)
+                })
+            })
+            .collect();
+        if waits.is_empty() {
+            return None;
+        }
+        Some(futures::future::select_all(waits).await.0)
     }
 
     /// Waits for all managed jobs to complete.
@@ -268,6 +332,12 @@ pub struct Job {
 
     /// The current operational state of the job.
     pub state: JobState,
+
+    /// The ID the shell gave the job, for when none of its processes has one.
+    own_pid: Option<sys::process::ProcessId>,
+
+    /// The job's status, once it's known to have finished.
+    status: Option<ExecutionExitCode>,
 }
 
 impl Display for Job {
@@ -298,6 +368,8 @@ impl Job {
             annotation: JobAnnotation::None,
             command_line,
             state,
+            own_pid: None,
+            status: None,
         }
     }
 
@@ -338,7 +410,8 @@ impl Job {
     pub fn poll_done(
         &mut self,
     ) -> Result<Option<Result<ExecutionResult, error::Error>>, error::Error> {
-        let mut result: Option<Result<ExecutionResult, error::Error>> = None;
+        let mut result: Option<Result<ExecutionResult, error::Error>> =
+            self.status.map(|status| Ok(status.into()));
 
         tracing::debug!(target: trace_categories::JOBS, "Polling job {} for completion...", self.id);
 
@@ -358,13 +431,19 @@ impl Job {
         tracing::debug!(target: trace_categories::JOBS, "Job {} has completed.", self.id);
 
         self.state = JobState::Done;
+        // Keep its status for a later `wait`, which finds no tasks left to wait for.
+        if let Some(Ok(done)) = &result {
+            self.status = Some(done.exit_code);
+        }
 
         Ok(result)
     }
 
     /// Waits for the job to complete.
     pub async fn wait(&mut self) -> Result<ExecutionResult, error::Error> {
-        let mut result = ExecutionResult::success();
+        let mut result = self
+            .status
+            .map_or_else(ExecutionResult::success, ExecutionResult::from);
 
         while let Some(task) = self.tasks.back_mut() {
             match task.wait().await? {
@@ -421,7 +500,7 @@ impl Job {
     fn continue_processes(&self) -> Result<(), error::Error> {
         if let Some(pgid) = self.own_process_group() {
             sys::signal::continue_process_group(pgid)
-        } else if let Some(pid) = self.representative_pid() {
+        } else if let Some(pid) = self.process_pid() {
             sys::signal::continue_process(pid)
         } else {
             Err(error::ErrorKind::FailedToSendSignal.into())
@@ -432,8 +511,11 @@ impl Job {
     pub fn check_signalable(&self) -> Result<(), error::Error> {
         if let Some(pgid) = self.own_process_group() {
             sys::signal::check_process_group_signalable(pgid)
-        } else if let Some(pid) = self.representative_pid() {
+        } else if let Some(pid) = self.process_pid() {
             sys::signal::check_signalable(pid)
+        } else if !self.tasks.is_empty() {
+            // It runs in the shell's own tasks, which `kill` can abort.
+            Ok(())
         } else {
             Err(error::ErrorKind::FailedToSendSignal.into())
         }
@@ -448,9 +530,11 @@ impl Job {
     pub fn kill(&mut self, signal: traps::TrapSignal) -> Result<(), error::Error> {
         if let Some(pgid) = self.own_process_group() {
             sys::signal::kill_process_group(pgid, signal)?;
-        } else if let Some(pid) = self.representative_pid() {
+        } else if let Some(pid) = self.process_pid() {
             sys::signal::kill_process(pid, signal)?;
         } else {
+            // A job running in the shell's own tasks has no process to signal; a host without
+            // signals can `abort` it instead.
             return Err(error::ErrorKind::FailedToSendSignal.into());
         }
 
@@ -463,8 +547,38 @@ impl Job {
         Ok(())
     }
 
-    /// Tries to retrieve a "representative" pid for the job.
+    /// Stops the job without signaling it, by aborting its tasks, and records it done with the
+    /// given status. Returns false, and does nothing, if any of its tasks is a process, or
+    /// can't be aborted.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The status the job is to have, as if it had exited with it.
+    pub fn abort(&mut self, status: ExecutionExitCode) -> bool {
+        if self.tasks.iter().any(JobTask::is_external) {
+            return false;
+        }
+        for task in &self.tasks {
+            if let JobTask::Internal(handle) = task
+                && !handle.abort()
+            {
+                return false;
+            }
+        }
+        self.tasks.clear();
+        self.state = JobState::Done;
+        self.status = Some(status);
+        true
+    }
+
+    /// Tries to retrieve a "representative" pid for the job: that of its first process with
+    /// one, or else the ID the shell gave it.
     pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
+        self.process_pid().or(self.own_pid)
+    }
+
+    /// Returns the process ID of the job's first process with one.
+    fn process_pid(&self) -> Option<sys::process::ProcessId> {
         for task in &self.tasks {
             match task {
                 JobTask::External(p) => {
@@ -481,8 +595,7 @@ impl Job {
     /// Tries to retrieve the process group ID (PGID) of the job: that of its own process group,
     /// if it has one, or else its representative pid.
     pub fn process_group_id(&self) -> Option<sys::process::ProcessId> {
-        self.own_process_group()
-            .or_else(|| self.representative_pid())
+        self.own_process_group().or_else(|| self.process_pid())
     }
 
     /// Returns the job's own process group, if it has one: under job control, its processes
@@ -492,5 +605,78 @@ impl Job {
             JobTask::External(child) => child.pgid(),
             JobTask::Internal(_) => None,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn, reason = "assertions in a fallible test")]
+mod tests {
+    use super::*;
+
+    /// A job running a task that never finishes, through a handle that can't abort it.
+    fn pending_job() -> Job {
+        let task =
+            sys::tasks::spawn(std::future::pending::<Result<ExecutionResult, error::Error>>());
+        Job::new(
+            [JobTask::Internal(tasks::TaskHandle::from_future(task))],
+            "pending".into(),
+            JobState::Running,
+        )
+    }
+
+    #[tokio::test]
+    async fn jobs_without_processes_get_distinct_pids() {
+        let mut jobs = JobManager::new();
+        let first = jobs.add_as_current(pending_job()).representative_pid();
+        let second = jobs.add_as_current(pending_job()).representative_pid();
+        assert!(first.is_some_and(|pid| pid >= FIRST_JOB_PID));
+        assert_ne!(first, second);
+        let second = second.unwrap_or_default();
+        assert_eq!(jobs.find_by_pid(second).map(|j| j.id), Some(2));
+    }
+
+    #[tokio::test]
+    async fn an_aborted_job_waits_with_its_status() -> Result<(), error::Error> {
+        let mut jobs = JobManager::new();
+        let task =
+            sys::tasks::spawn(std::future::pending::<Result<ExecutionResult, error::Error>>());
+        jobs.add_as_current(Job::new(
+            [JobTask::Internal(task)],
+            "pending".into(),
+            JobState::Running,
+        ));
+        let job = jobs
+            .current_job_mut()
+            .ok_or(error::ErrorKind::FailedToSendSignal)?;
+        assert!(job.abort(ExecutionExitCode::from(143)));
+        assert!(matches!(job.state, JobState::Done));
+        assert_eq!(u8::from(job.wait().await?.exit_code), 143);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_whose_task_cannot_abort_is_left_alone() {
+        let mut job = pending_job();
+        assert!(!job.abort(ExecutionExitCode::from(143)));
+        assert!(matches!(job.state, JobState::Running));
+    }
+
+    #[tokio::test]
+    async fn wait_any_yields_the_first_job_to_finish() {
+        let mut jobs = JobManager::new();
+        jobs.add_as_current(pending_job());
+        let done = sys::tasks::spawn(async { Ok(ExecutionResult::new(7)) });
+        jobs.add_as_current(Job::new(
+            [JobTask::Internal(done)],
+            "done".into(),
+            JobState::Running,
+        ));
+        let (id, result) = jobs
+            .wait_any(None)
+            .await
+            .unwrap_or((0, Ok(ExecutionResult::success())));
+        assert_eq!(id, 2);
+        assert!(result.is_ok_and(|r| u8::from(r.exit_code) == 7));
+        assert!(jobs.wait_any(Some(&[3])).await.is_none());
     }
 }

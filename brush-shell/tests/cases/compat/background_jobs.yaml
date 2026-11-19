@@ -98,7 +98,6 @@ cases:
       echo "status: $?"
 
   - name: "$! names the last background job's process"
-    known_failure: true # TODO(jobs): a background job isn't tied to its processes, so `$!` is empty
     stdin: |
       sleep 0.1 &
       if [ -n "$!" ] && kill -0 "$!"; then echo "running"; fi

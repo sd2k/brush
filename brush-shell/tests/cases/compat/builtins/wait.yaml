@@ -1,7 +1,6 @@
 name: "Builtins: wait"
 cases:
   - name: "wait for specific failed PID"
-    known_failure: true # TODO(jobs): wait should return job's exit status
     stdin: |
       (exit 5) &
       pid=$!
@@ -16,7 +15,6 @@ cases:
       echo "status: $?"
 
   - name: "wait in conditional for failed PID"
-    known_failure: true # TODO(jobs): wait should return job's exit status
     stdin: |
       (exit 5) &
       pid=$!
@@ -33,8 +31,7 @@ cases:
       wait
       echo "after wait all"
 
-  - name: "wait -n not implemented"
-    known_failure: true # TODO(builtins): wait -n not implemented
+  - name: "wait -n waits for each job in turn"
     stdin: |
       (exit 0) &
       (exit 5) &
@@ -44,7 +41,6 @@ cases:
       echo "second done, status: $?"
 
   - name: "Background job failure with wait"
-    known_failure: true # TODO(jobs): wait should return job's exit status
     stdin: |
       { sleep 0.01; exit 3; } &
       pid=$!
@@ -80,7 +76,6 @@ cases:
       echo "status: $?"
 
   - name: "wait for a job that doesn't exist fails with status 127"
-    known_failure: true # TODO(wait): wait with job specs not implemented
     ignore_stderr: true
     stdin: |
       wait %9
@@ -100,7 +95,6 @@ cases:
       echo "status: $?"
 
   - name: "wait for a process that isn't the shell's child"
-    known_failure: true # TODO(signals): a job's shell code isn't a process to wait for or signal
     ignore_stderr: true
     stdin: |
       wait 12345
@@ -109,7 +103,7 @@ cases:
       echo "status: $?"
 
   - name: "wait for a job's $! once it has finished"
-    known_failure: true # TODO(signals): a job's shell code isn't a process to wait for or signal
+    known_failure: true # TODO(jobs): brush forgets a job once wait reports it; bash remembers its status for a later wait
     stdin: |
       (exit 5) &
       pid=$!

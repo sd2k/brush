@@ -39,7 +39,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for KillCommand {
 
     async fn execute(
         self,
-        context: brush_core::ExecutionContext<'_, SE>,
+        mut context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let mut signal_zero = false;
 
@@ -124,35 +124,51 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for KillCommand {
             return Ok(ExecutionExitCode::InvalidUsage.into());
         };
 
-        if pid_or_job_spec.starts_with('%') {
-            // It's a job spec.
-            if let Some(job) = context.shell.jobs_mut().resolve_job_spec(pid_or_job_spec) {
-                if signal_zero {
-                    job.check_signalable()?;
-                } else {
-                    job.kill(trap_signal)?;
-                }
-            } else {
-                writeln!(
-                    context.stderr(),
-                    "{}: {}: no such job",
-                    context.command_name,
-                    pid_or_job_spec
-                )?;
-                return Ok(ExecutionResult::general_error());
-            }
-        } else {
-            let pid = brush_core::int_utils::parse(pid_or_job_spec.as_str(), 10)?;
+        signal_target(&mut context, pid_or_job_spec, trap_signal, signal_zero)
+    }
+}
 
-            // It's a pid.
+/// Sends `trap_signal` (or, with `signal_zero`, checks that it could be sent) to the job or
+/// process `pid_or_job_spec` names.
+fn signal_target(
+    context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+    pid_or_job_spec: &str,
+    trap_signal: TrapSignal,
+    signal_zero: bool,
+) -> Result<ExecutionResult, brush_core::Error> {
+    let jobs = context.shell.jobs_mut();
+    let job = if pid_or_job_spec.starts_with('%') {
+        // It's a job spec.
+        jobs.resolve_job_spec(pid_or_job_spec)
+    } else {
+        let pid = brush_core::int_utils::parse(pid_or_job_spec, 10)?;
+
+        // It's a pid: a job's, perhaps one the shell gave it, which no process has.
+        let Some(job) = jobs.find_by_pid(pid) else {
             if signal_zero {
                 sys::signal::check_signalable(pid)?;
             } else {
                 sys::signal::kill_process(pid, trap_signal)?;
             }
+            return Ok(ExecutionResult::success());
+        };
+        Some(job)
+    };
+
+    match job {
+        Some(job) if signal_zero => job.check_signalable()?,
+        Some(job) => job.kill(trap_signal)?,
+        None => {
+            writeln!(
+                context.stderr(),
+                "{}: {}: no such job",
+                context.command_name,
+                pid_or_job_spec
+            )?;
+            return Ok(ExecutionResult::general_error());
         }
-        Ok(ExecutionResult::success())
     }
+    Ok(ExecutionResult::success())
 }
 
 fn print_signals(

@@ -14,9 +14,11 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    TaskHandle::from_future(
-        tokio::spawn(future)
-            .map(|r| r.map_err(|err| error::ErrorKind::TaskError(Box::new(err)).into())),
+    let task = tokio::spawn(future);
+    let abort = task.abort_handle();
+    TaskHandle::from_future_with_abort(
+        task.map(|r| r.map_err(|err| error::ErrorKind::TaskError(Box::new(err)).into())),
+        move || abort.abort(),
     )
 }
 

@@ -14,7 +14,9 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    TaskHandle::from_future(tokio::spawn(future).map(|r| r.map_err(join_error)))
+    let task = tokio::spawn(future);
+    let abort = task.abort_handle();
+    TaskHandle::from_future_with_abort(task.map(|r| r.map_err(join_error)), move || abort.abort())
 }
 
 /// Starts running a future that may block the thread it runs on (e.g., with
@@ -74,6 +76,13 @@ mod tests {
     #[tokio::test]
     async fn spawn_yields_a_task_error_if_the_task_panics() {
         assert!(is_task_error(&spawn(async { unwind() }).await));
+    }
+
+    #[tokio::test]
+    async fn an_aborted_task_yields_a_task_error() {
+        let task = spawn(std::future::pending::<()>());
+        assert!(task.abort());
+        assert!(is_task_error(&task.await));
     }
 
     #[tokio::test]

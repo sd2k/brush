@@ -14,9 +14,11 @@ type TaskFuture<T> = Pin<Box<dyn Future<Output = Result<T, error::Error>> + Send
 /// output, or an error if the task couldn't run to completion (e.g., it
 /// panicked).
 ///
-/// Dropping the handle doesn't stop the task.
+/// Dropping the handle doesn't stop the task; [`TaskHandle::abort`] does, if
+/// whoever started it said how.
 pub struct TaskHandle<T> {
     future: TaskFuture<T>,
+    abort: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl<T> TaskHandle<T> {
@@ -30,7 +32,31 @@ impl<T> TaskHandle<T> {
     ) -> Self {
         Self {
             future: Box::pin(future),
+            abort: None,
         }
+    }
+
+    /// Tracks a task through a future that yields its output when it finishes,
+    /// and a function that stops it. Once stopped, the future should yield an
+    /// error.
+    ///
+    /// # Arguments
+    ///
+    /// * `future` - The future to await for the task's output.
+    /// * `abort` - Stops the task.
+    pub fn from_future_with_abort(
+        future: impl Future<Output = Result<T, error::Error>> + Send + Sync + 'static,
+        abort: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            future: Box::pin(future),
+            abort: Some(Box::new(abort)),
+        }
+    }
+
+    /// Stops the task, if it can be stopped; returns whether it could.
+    pub fn abort(&self) -> bool {
+        self.abort.as_ref().map(|abort| abort()).is_some()
     }
 }
 
